@@ -1,40 +1,48 @@
 package main
 
 import (
-	"github.com/bwmarrin/discordgo"
-	"time"
-	"sync"
+	"fmt"
 	"log"
 	"strings"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"golang.org/x/sync/errgroup"
 )
 
+// To add the bot, have server owner go this URL
 // https://discordapp.com/oauth2/authorize?client_id=498388551277215745&scope=bot
-// my discord guild ID  - 138425546173448192
 
-// 2018/10/07 01:54:10 main.go:65: @everyone 138425546173448192
-// 2018/10/07 01:54:10 main.go:65: Twitch Subscriber 138426505373024256
-// 2018/10/07 01:54:10 main.go:65: Server Admin 138428210374246400
-// 2018/10/07 01:54:10 main.go:65: Xangold 138427840189169665
-// 2018/10/07 01:54:10 main.go:65: streamer 498416072563884042
-// 2018/10/07 01:54:10 main.go:65: private user 180191816333656064
-// 2018/10/07 01:54:10 main.go:65: Bots 138832305140662272
-// 2018/10/07 01:54:10 main.go:65: Moderator 138426849607811072
-// 2018/10/07 01:54:10 main.go:65: Xanbot Admins 138445646385381376
+// Required Setup
 
-const guildID = "138425546173448192"
-const streamerRoleID = "498416072563884042"
-var wg = &sync.WaitGroup{}
+// Add bot (above)
+// Add bot to a "Bot" role in server
+//  Allow this role access to change roles
+//  Reorder this role above any roles that need changing (it can't alter roles of users that are above it)
+// Create "streamer" role
+//  Ensure this is below the bot role so it can alter users in this role
+
+const (
+	guildID        = "138425546173448192"
+	streamerRoleID = "498416072563884042"
+	botAPIToken    = "" // secret
+)
+const (
+	updateInterval = 30 * time.Second
+)
 
 // need to be playing a game with this in title
-var applicableStreamingTerms = []string{"ark","gsrp","gunsmoke","chrome"}
+var applicableStreamingTerms = []string{"ark", "gsrp", "gunsmoke", "chrome"}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	discord, err := discordgo.New("Bot " + "ENTER TOKEN HERE")
+	discord, err := discordgo.New(fmt.Sprintf("Bot %s", botAPIToken))
 	if err != nil {
-		log.Fatalf("error creating discord session: %v",err)
+		log.Fatalf("error creating discord session: %v", err)
 	}
+
+	// TBD - not sure why this is required
 	err = discord.Open()
 	if err != nil {
 		log.Println("error opening connection,", err)
@@ -45,116 +53,101 @@ func main() {
 	discord.AddHandler(guildMembersChunk)
 	discord.AddHandler(memberRemove)
 	discord.AddHandler(memberUpdate)
-	time.Sleep(5*time.Second)
-	wg.Add(1)
-	go loop(discord)
-	wg.Wait()
-	}
+
+	loop(discord)
+}
 
 func loop(discord *discordgo.Session) {
-	
-	defer wg.Done()
 	for {
-		go func() {
-			log.Println("starting main loop")
-			var streamersMap = make(map[string]struct{})
-			state := discordgo.NewState()
-			guild,err := discord.Guild(guildID)
-			if err != nil {
-				log.Fatalf("error getting guild: %v",err)
-			}
-			if err := state.GuildAdd(guild);err != nil {
-				log.Fatalf("could not add guildID %s to state: %v",guildID,err)
-			}
-			channels,err := discord.GuildChannels(guildID)
-			if err != nil {
-				log.Fatalf("error getting guild channels: %v",err)
-			}
-			for _,channel := range channels {
-				if err := state.ChannelAdd(channel);err != nil {
-					log.Fatalf("could not add channel %s to state: %v",channel.Name, err)
-				}
-			}
-			// uncomment to get roles
-			// roles,err := discord.GuildRoles(guildID)
-			// if err != nil {
-			// 	log.Fatalf("could not get roles: %v",err)
-			// }
-			// for _,role := range roles {
-			// 	log.Println(role.Name,role.ID)
-			// }
-			
-			// fill map with existing streamers
-			memberWG := sync.WaitGroup{}
-			memberWG.Add(len(guild.Presences))
-			for _,guildPresence := range guild.Presences{				
-				go func(gp *discordgo.Presence){
-					defer memberWG.Done()
-					guildMember,err := discord.GuildMember(guildID,gp.User.ID)
-					if err != nil {
-						log.Println("got error getting member",err)
-						return
-					} 
-					log.Println("roles",guildMember.Roles,"for user",gp.User.ID)
-					if stringInSlice(streamerRoleID,guildMember.Roles) {
-						log.Println("adding streamer",gp.User.ID)
-						streamersMap[gp.User.ID] = struct{}{}
-					}
-				}(guildPresence)
-			}
-			memberWG.Wait()
-			for _, guildPresence := range guild.Presences {	
-				isStreamingARK := false			
-				if guildPresence.Game != nil {
-					if len(guildPresence.Game.URL) > 0 || strings.Contains(guildPresence.Game.Name,"Google") {
-						log.Printf("%s playing %s on %s",guildPresence.User.ID, guildPresence.Game.Name,guildPresence.Game.URL)
-						if err := discord.GuildMemberRoleAdd(guildID,guildPresence.User.ID, streamerRoleID); err != nil {
-							log.Fatalf("could not add %s to role:%v",guildID,guildPresence.User.ID,err)
-						}
-						isStreamingARK = true
-					} else {
-						log.Println("not playing correct thing",guildPresence.Game.Name,guildPresence.User.ID)
-					}
-				} 
-				if !isStreamingARK {
-					if _,ok := streamersMap[guildPresence.User.ID] ;ok{
-						log.Println("removing role...",guildPresence.User.ID)
-						if err := discord.GuildMemberRoleRemove(guildID,guildPresence.User.ID, streamerRoleID); err != nil {
-							log.Fatalf("could not remove %s from role:%v",guildID,guildPresence.User.ID,err)
-						}
-					}
-				}
-			}
-			log.Println("ending main loop")
-		}()
-		time.Sleep(30*time.Second)
+		updateFromPresence(discord)
+		time.Sleep(updateInterval)
 	}
 }
 
+func updateFromPresence(discord *discordgo.Session) error {
+	log.Println("starting main loop")
+	var streamersMap = make(map[string]struct{})
+	guild, err := discord.Guild(guildID)
+	if err != nil {
+		return fmt.Errorf("error getting guild: %v", err)
+	}
+
+	// get existing guild members, in order to find currently marked streamers
+	var g errgroup.Group
+	for _, gp := range guild.Presences {
+		g.Go(func() error {
+			guildMember, err := discord.GuildMember(guildID, gp.User.ID)
+			if err != nil {
+				return fmt.Errorf("error getting member: %v", err)
+			}
+			if stringInSlice(streamerRoleID, guildMember.Roles) {
+				log.Printf("error adding streamer: %s", gp.User.ID)
+				streamersMap[gp.User.ID] = struct{}{}
+			}
+			return nil
+		})
+	}
+	g.Wait()
+
+	for _, userPresence := range guild.Presences {
+		isStreamingARK := false
+		if userPresence.Game != nil {
+			if len(userPresence.Game.URL) > 0 {
+				hasRequiredTextInGame := false
+				for _, term := range applicableStreamingTerms {
+					if strings.Contains(strings.ToLower(userPresence.Game.Name), term) {
+						hasRequiredTextInGame = true
+					}
+				}
+				if hasRequiredTextInGame {
+					log.Printf("%s playing %s on %s", userPresence.User.ID, userPresence.Game.Name, userPresence.Game.URL)
+					if err := discord.GuildMemberRoleAdd(guildID, userPresence.User.ID, streamerRoleID); err != nil {
+						return fmt.Errorf("could not add %s to role: %v", userPresence.User.ID, err)
+					}
+					isStreamingARK = true
+				}
+			}
+		}
+
+		// remove the streamers that were previously playing ARK, but are no longer
+		if !isStreamingARK {
+			if _, ok := streamersMap[userPresence.User.ID]; ok {
+				log.Printf("removing %s as a streamer...", userPresence.User.ID)
+				if err := discord.GuildMemberRoleRemove(guildID, userPresence.User.ID, streamerRoleID); err != nil {
+					return fmt.Errorf("could not remove %s from role: %v", userPresence.User.ID, err)
+				}
+			}
+		}
+	}
+	log.Println("ending main loop")
+	return nil
+}
+
+// TBD - not sure what exactly these do? they seem to be required.
 func ready(s *discordgo.Session, event *discordgo.Ready) {
-	log.Println("ready",s,event)
+	log.Println("ready", s, event)
 }
 
 func memberAdd(s *discordgo.Session, event *discordgo.Ready) {
-	log.Println("ready",s,event)
+	log.Println("ready", s, event)
 }
 
 func guildMembersChunk(s *discordgo.Session, event *discordgo.Ready) {
-	log.Println("ready",s,event)
+	log.Println("ready", s, event)
 }
 
 func memberRemove(s *discordgo.Session, event *discordgo.Ready) {
-	log.Println("ready",s,event)
+	log.Println("ready", s, event)
 }
 func memberUpdate(s *discordgo.Session, event *discordgo.Ready) {
-	log.Println("ready",s,event)
+	log.Println("ready", s, event)
 }
 
 func stringInSlice(a string, list []string) bool {
-    for _, b := range list {
-        if b == a {
-            return true
-        }
-    }
-    return false
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+	return false
 }
