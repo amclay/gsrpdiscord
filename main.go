@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/goware/urlx"
+	"github.com/nicklaw5/helix"
+	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,6 +29,8 @@ const (
 	guildID        = "138425546173448192"
 	streamerRoleID = "498416072563884042"
 	botAPIToken    = "" // secret
+
+	twitchClientID = "s4rhf3o6glc9dqh2vqizj77d7n2ztmx" // uses Xanbot, owned by user ID 39141793 (xangold)
 )
 const (
 	updateInterval = 30 * time.Second
@@ -34,8 +39,18 @@ const (
 // need to be playing a game with this in title
 var applicableStreamingTerms = []string{"ark", "gsrp", "gunsmoke", "chrome"}
 
+var twitchClient *helix.Client
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	var err error
+	twitchClient, err = helix.NewClient(&helix.Options{
+		ClientID: twitchClientID,
+	})
+	if err != nil {
+		log.Fatalf("error creating twitch client: %v", err)
+	}
 
 	discord, err := discordgo.New(fmt.Sprintf("Bot %s", botAPIToken))
 	if err != nil {
@@ -106,6 +121,14 @@ func updateFromPresence(discord *discordgo.Session) error {
 					}
 					isStreamingARK = true
 				}
+				title, err := getStreamTitle(userPresence.Game.URL)
+				if err == nil {
+					for _, term := range applicableStreamingTerms {
+						if strings.Contains(strings.ToLower(title), term) {
+							hasRequiredTextInGame = true
+						}
+					}
+				}
 			}
 		}
 
@@ -121,6 +144,23 @@ func updateFromPresence(discord *discordgo.Session) error {
 	}
 	log.Println("ending main loop")
 	return nil
+}
+
+func getStreamTitle(url string) (string, error) {
+	parsedURL, err := urlx.Parse(url)
+	if err != nil {
+		return "", fmt.Errorf("could not parse URL: %s %v", url, err)
+	}
+	twitchStreamResponse, err := twitchClient.GetStreams(&helix.StreamsParams{
+		UserLogins: []string{parsedURL.Path},
+	})
+	if err != nil {
+		return "", errors.Wrap(err, "could not get streams response")
+	}
+	if len(twitchStreamResponse.Data.Streams) == 0 {
+		return "", errors.New("no streams")
+	}
+	return twitchStreamResponse.Data.Streams[0].Title, nil
 }
 
 // TBD - not sure what exactly these do? they seem to be required.
